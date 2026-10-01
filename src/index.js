@@ -18,8 +18,25 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
 
-// Gemini helper function with verified active models
-async function askGemini(prompt, systemInstruction = '') {
+// Helper: safe reply with Markdown fallback
+async function replyFormatted(ctx, text) {
+  try {
+    // Convert **bold** to *bold* for Telegram Markdown
+    const tgMarkdown = text
+      .replace(/\*\*(.*?)\*\*/g, '*$1*')
+      .replace(/### (.*?)\n/g, '*$1*\n')
+      .replace(/## (.*?)\n/g, '*$1*\n')
+      .replace(/# (.*?)\n/g, '*$1*\n');
+
+    await ctx.replyWithMarkdown(tgMarkdown);
+  } catch (err) {
+    // If Markdown parsing fails, fallback to clean plain text
+    await ctx.reply(text);
+  }
+}
+
+// Gemini helper function with multimodal (Text + Images) support
+async function askGemini(prompt, systemInstruction = '', imageBuffer = null, mimeType = 'image/jpeg') {
   if (!GEMINI_API_KEY) {
     return 'Ошибка: GEMINI_API_KEY не указан в файле .env.';
   }
@@ -31,16 +48,29 @@ async function askGemini(prompt, systemInstruction = '') {
     'gemini-flash-latest'
   ];
   
+  const parts = [];
+  
+  if (systemInstruction) {
+    parts.push({ text: `[Системная инструкция]: ${systemInstruction}\n\n` });
+  }
+
+  if (imageBuffer) {
+    parts.push({
+      inline_data: {
+        mime_type: mimeType,
+        data: imageBuffer.toString('base64')
+      }
+    });
+  }
+
+  parts.push({ text: prompt });
+
+  const postData = JSON.stringify({
+    contents: [{ parts }]
+  });
+
   for (const model of models) {
     try {
-      const fullPrompt = systemInstruction 
-        ? `${systemInstruction}\n\nЗапрос пользователя:\n${prompt}`
-        : prompt;
-
-      const postData = JSON.stringify({
-        contents: [{ parts: [{ text: fullPrompt }] }]
-      });
-
       const res = await new Promise((resolve, reject) => {
         const req = https.request({
           hostname: 'generativelanguage.googleapis.com',
@@ -67,15 +97,13 @@ async function askGemini(prompt, systemInstruction = '') {
         if (parsed.candidates && parsed.candidates[0]?.content?.parts?.[0]?.text) {
           return parsed.candidates[0].content.parts[0].text;
         }
-      } else {
-        console.log(`Model ${model} returned status:`, res.statusCode);
       }
     } catch (err) {
       console.error(`Error with model ${model}:`, err.message);
     }
   }
 
-  return 'Извините, возникла небольшая заминка при обращении к модели. Попробуйте еще раз через мгновение!';
+  return 'Извините, возникла небольшая заминка при обработке. Попробуйте еще раз через мгновение!';
 }
 
 // Notion helper: Search and get text content of pages
@@ -104,7 +132,6 @@ async function getNotionPagesContent(query = '') {
 
       resultText += `\n\n=== СТРАНИЦА NOTION: "${title}" ===\n`;
 
-      // Fetch blocks inside page
       try {
         const blocks = await notion.blocks.children.list({
           block_id: page.id,
@@ -132,6 +159,18 @@ async function getNotionPagesContent(query = '') {
   }
 }
 
+// Download helper for Telegram files/photos
+async function downloadTelegramFile(fileUrl) {
+  return new Promise((resolve, reject) => {
+    https.get(fileUrl, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+  });
+}
+
 // --- TELEGRAM BOT HANDLERS ---
 
 const SYSTEM_PROMPT = `
@@ -139,20 +178,21 @@ const SYSTEM_PROMPT = `
 Дима — Fullstack-разработчик (React, TypeScript, Tailwind, Node.js, Express/NestJS, PostgreSQL, Docker).
 Его активные проекты: конструктор сайтов-открыток & поздравлений, CRM для аренды авто, SimpleOne enterprise low-code платформа.
 Твой стиль общения: дружелюбный, технически грамотный, уверенный, уважительный, лаконичный, на русском языке.
-Ты помогаешь Диме с проектами, выжимками из Notion, расписанием в Google Календаре, кодом, планированием задач и ответами.
+Ты помогаешь Диме с проектами, выжимками из Notion, расписанием в Google Календаре, кодом, анализом фото/скриншотов и планированием задач.
 `;
 
 bot.start((ctx) => {
   const name = ctx.from.first_name || 'Дима';
-  ctx.reply(
-    `👋 Привет, ${name}! Я твой личный ассистент Jarvis.\n\n` +
+  replyFormatted(ctx,
+    `👋 *Привет, ${name}! Я твой личный ассистент Jarvis.*\n\n` +
     `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
-    `📌 Что я умею:\n` +
-    `• 📅 Календарь: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
-    `• 📄 Выжимки из Notion: напиши "что лежит в notion?" или /notion\n` +
-    `• 🔍 Поиск по проектам: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
-    `• 💬 Быстрый диалог: пиши мне как обычному напарнику по коду\n\n` +
-    `Попробуй спросить: "Посмотри встречи на сегодня!" или "Что в Notion?"!`
+    `📌 *Что я умею:*\n` +
+    `• 📅 *Календарь*: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
+    `• 📄 *Выжимки из Notion*: напиши "что лежит в notion?" или /notion\n` +
+    `• 🖼 *Анализ фото и скриншотов*: отправь мне скриншот ошибки, макет Figma или фото документа\n` +
+    `• 🔍 *Поиск по проектам*: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
+    `• 💬 *Быстрый диалог*: пиши мне как обычному напарнику по коду\n\n` +
+    `Попробуй спросить: "Посмотри встречи на сегодня!" или отправь скриншот!`
   );
 });
 
@@ -161,7 +201,7 @@ bot.command('calendar', async (ctx) => {
   const events = await getCalendarEvents();
   
   if (!events) {
-    return ctx.reply('📅 Модуль календаря не настроен на сервере (нужно добавить переменные GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN).');
+    return ctx.reply('📅 Модуль календаря не настроен на сервере.');
   }
 
   if (events.length === 0) {
@@ -175,7 +215,7 @@ bot.command('calendar', async (ctx) => {
     text += `• 🕐 *${start}${end ? ' - ' + end : ''}*: ${e.summary || 'Без названия'}\n`;
   }
 
-  ctx.replyWithMarkdown(text);
+  replyFormatted(ctx, text);
 });
 
 bot.command('notion', async (ctx) => {
@@ -190,7 +230,27 @@ bot.command('notion', async (ctx) => {
   const prompt = `Пользователь запросил выжимку по Notion (запрос: "${query}"):\n${content}\n\nСделай емкое, структурированное и красивое резюме этой информации:`;
   const summary = await askGemini(prompt, SYSTEM_PROMPT);
 
-  ctx.reply(summary);
+  replyFormatted(ctx, summary);
+});
+
+// Photo handler: Multimodal analysis with Gemini Vision
+bot.on('photo', async (ctx) => {
+  await ctx.sendChatAction('typing');
+
+  try {
+    const photos = ctx.message.photo;
+    const bestPhoto = photos[photos.length - 1];
+    const fileLink = await ctx.telegram.getFileLink(bestPhoto.file_id);
+    const imageBuffer = await downloadTelegramFile(fileLink.href);
+
+    const userCaption = ctx.message.caption || 'Проанализируй это изображение, подробно объясни что на нем и ответь на вопросы, если есть.';
+    const response = await askGemini(userCaption, SYSTEM_PROMPT, imageBuffer, 'image/jpeg');
+
+    replyFormatted(ctx, response);
+  } catch (err) {
+    console.error('Error handling photo:', err.message);
+    ctx.reply('Произошла ошибка при анализе изображения. Попробуйте отправить еще раз.');
+  }
 });
 
 bot.on('text', async (ctx) => {
@@ -198,7 +258,7 @@ bot.on('text', async (ctx) => {
   await ctx.sendChatAction('typing');
 
   // Check if message is related to Calendar
-  const calendarKeywords = ['встреч', 'расписани', 'календар', 'созвон', 'план на сегодня', 'что сегодня'];
+  const calendarKeywords = ['встреч', 'расписани', 'календар', 'созвон', 'план на сегодня', 'что сегодня', 'дела на сегодня'];
   const isCalendarQuery = calendarKeywords.some(k => text.toLowerCase().includes(k));
 
   if (isCalendarQuery) {
@@ -214,9 +274,9 @@ bot.on('text', async (ctx) => {
         return `- ${start} ${end ? 'до ' + end : ''}: ${e.summary || 'Событие'}`;
       }).join('\n');
 
-      const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря на сегодня:\n${eventSummary}\n\nОтветь дружелюбно, четко перечислив встречи:`;
+      const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря на сегодня:\n${eventSummary}\n\nОтветь дружелюбно и четко:`;
       const response = await askGemini(prompt, SYSTEM_PROMPT);
-      return ctx.reply(response);
+      return replyFormatted(ctx, response);
     }
   }
 
@@ -229,13 +289,13 @@ bot.on('text', async (ctx) => {
     if (content) {
       const prompt = `Запрос пользователя: "${text}"\n\nВот актуальные данные из Notion:\n${content}\n\nОтветь на запрос пользователя, используя данные из Notion:`;
       const response = await askGemini(prompt, SYSTEM_PROMPT);
-      return ctx.reply(response);
+      return replyFormatted(ctx, response);
     }
   }
 
   // General assistant dialogue
   const response = await askGemini(text, SYSTEM_PROMPT);
-  ctx.reply(response);
+  replyFormatted(ctx, response);
 });
 
 // Launch bot
