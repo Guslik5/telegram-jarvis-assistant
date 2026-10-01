@@ -1,6 +1,6 @@
 import { Telegraf } from 'telegraf';
-import { Client as NotionClient } from '@notionhq/client';
 import { getCalendarEvents, createCalendarEvent } from './calendar.js';
+import { getNotionPagesContent, createNotionPage } from './notion.js';
 import { sendTelegramFormatted } from './formatter.js';
 import dotenv from 'dotenv';
 import https from 'https';
@@ -8,7 +8,6 @@ import https from 'https';
 dotenv.config();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || '1913377793';
 
@@ -18,7 +17,6 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
-const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
 
 // Security Middleware: Allow only Dima (ID: 1913377793)
 bot.use(async (ctx, next) => {
@@ -104,59 +102,6 @@ async function askGemini(prompt, systemInstruction = '', imageBuffer = null, mim
   return 'Извините, возникла небольшая заминка при обработке. Попробуйте еще раз через мгновение!';
 }
 
-// Notion helper: Search and get text content of pages
-async function getNotionPagesContent(query = '') {
-  if (!notion) return null;
-
-  try {
-    const searchRes = await notion.search({
-      query: query,
-      page_size: 10
-    });
-
-    if (!searchRes.results || searchRes.results.length === 0) {
-      return null;
-    }
-
-    let resultText = '';
-
-    for (const page of searchRes.results) {
-      let title = 'Без названия';
-      if (page.properties?.title?.title?.[0]?.plain_text) {
-        title = page.properties.title.title[0].plain_text;
-      } else if (page.properties?.Name?.title?.[0]?.plain_text) {
-        title = page.properties.Name.title[0].plain_text;
-      }
-
-      resultText += `\n\n=== СТРАНИЦА NOTION: "${title}" ===\n`;
-
-      try {
-        const blocks = await notion.blocks.children.list({
-          block_id: page.id,
-          page_size: 40
-        });
-
-        for (const block of blocks.results) {
-          const type = block.type;
-          if (block[type]?.rich_text) {
-            const text = block[type].rich_text.map(t => t.plain_text).join('');
-            if (text.trim()) {
-              resultText += `- ${text}\n`;
-            }
-          }
-        }
-      } catch (blockErr) {
-        console.error('Error fetching blocks for page', page.id, blockErr.message);
-      }
-    }
-
-    return resultText;
-  } catch (err) {
-    console.error('Notion search error:', err.message);
-    return null;
-  }
-}
-
 // Download helper for Telegram files/photos
 async function downloadTelegramFile(fileUrl) {
   return new Promise((resolve, reject) => {
@@ -186,11 +131,9 @@ bot.start((ctx) => {
     `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
     `📌 **Что я умею:**\n` +
     `• 📅 **Календарь**: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
-    `• 📄 **Выжимки из Notion**: напиши "что лежит в notion?" или /notion\n` +
-    `• 🖼 **Анализ фото и скриншотов**: отправь мне скриншот ошибки, макет Figma или фото документа\n` +
-    `• 🔍 **Поиск по проектам**: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
-    `• 💬 **Быстрый диалог**: пиши мне как обычному напарнику по коду\n\n` +
-    `Попробуй спросить: "Посмотри встречи на сегодня!" или "Сделай выжимку из Notion"!`
+    `• 📄 **Notion**: выжимки страниц ("что в notion?"), создание новых страниц ("создай страницу <название>")\n` +
+    `• 🖼 **Анализ фото**: отправь скриншот ошибки, макет Figma или фото\n` +
+    `• 💬 **Диалог**: пиши мне любые вопросы по коду и задачам!`
   );
 });
 
@@ -255,7 +198,47 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   await ctx.sendChatAction('typing');
 
-  // Check if message is related to Calendar
+  // 1. Check if user wants to CREATE a page in Notion
+  const createKeywords = ['создай страницу', 'создать страницу', 'добавь страницу', 'сделай страницу'];
+  const isCreatePage = createKeywords.some(k => text.toLowerCase().includes(k));
+
+  if (isCreatePage) {
+    // Extract title, description and links
+    const linkRegex = /(https?:\/\/[^\s]+)/g;
+    const links = (text.match(linkRegex) || []).map(url => ({ title: url, url }));
+
+    const extractPrompt = `
+Извлеки из текста пользователя название страницы для Notion и краткое описание.
+Текст пользователя: "${text}"
+
+Верни строго JSON формата:
+{"title": "Название страницы", "description": "Краткое описание страницы"}
+    `;
+
+    try {
+      const extracted = await askGemini(extractPrompt);
+      const jsonMatch = extracted.match(/\{[\s\S]*\}/);
+      let title = 'Новая страница';
+      let description = '';
+
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        title = parsed.title || title;
+        description = parsed.description || description;
+      }
+
+      const createdPage = await createNotionPage(title, description, links);
+      if (createdPage) {
+        return sendTelegramFormatted(ctx, `✅ **Страница "${title}" успешно создана в твоем Notion!**\n\n📄 [Открыть страницу в Notion](${createdPage.url})`);
+      } else {
+        return ctx.reply('⚠️ Не удалось создать страницу в Notion. Проверьте доступ и попробуйте еще раз.');
+      }
+    } catch (e) {
+      console.error('[NOTION CREATE ERROR]:', e.message);
+    }
+  }
+
+  // 2. Check if message is related to Calendar
   const calendarKeywords = ['встреч', 'расписани', 'календар', 'созвон', 'план на сегодня', 'что сегодня', 'дела на сегодня'];
   const isCalendarQuery = calendarKeywords.some(k => text.toLowerCase().includes(k));
 
@@ -278,7 +261,7 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // Check if message is related to Notion
+  // 3. Check if message is related to Notion reading/search
   const notionKeywords = ['ноушен', 'notion', 'выжимк', 'тз', 'документаци', 'что лежит', 'страниц', 'дома аренд', 'открытк', 'проект'];
   const isNotionQuery = notionKeywords.some(k => text.toLowerCase().includes(k));
 
