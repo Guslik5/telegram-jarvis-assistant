@@ -2,6 +2,7 @@ import { Telegraf } from 'telegraf';
 import { getCalendarEvents, createCalendarEvent } from './calendar.js';
 import { getNotionPagesContent, createNotionPage } from './notion.js';
 import { sendTelegramFormatted } from './formatter.js';
+import { classifyUserIntent } from './router.js';
 import dotenv from 'dotenv';
 import https from 'https';
 
@@ -131,7 +132,7 @@ bot.start((ctx) => {
     `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
     `📌 **Что я умею:**\n` +
     `• 📅 **Календарь**: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
-    `• 📄 **Notion**: выжимки страниц ("что в notion?"), создание новых страниц ("создай страницу <название>")\n` +
+    `• 📄 **Notion**: выжимки ("что в notion?"), создание страниц ("запиши номер телефона в notion", "создай страницу по проекту")\n` +
     `• 🖼 **Анализ фото**: отправь скриншот ошибки, макет Figma или фото\n` +
     `• 💬 **Диалог**: пиши мне любые вопросы по коду и задачам!`
   );
@@ -198,51 +199,40 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   await ctx.sendChatAction('typing');
 
-  // 1. Check if user wants to CREATE a page in Notion
-  const createKeywords = ['создай страницу', 'создать страницу', 'добавь страницу', 'сделай страницу'];
-  const isCreatePage = createKeywords.some(k => text.toLowerCase().includes(k));
+  // Smart AI Intent Classification
+  const intent = await classifyUserIntent(text, GEMINI_API_KEY);
+  console.log('[ROUTER] Intent:', JSON.stringify(intent));
 
-  if (isCreatePage) {
-    // Extract title, description and links
+  // 1. ACTION: Create a new page in Notion
+  if (intent.action === 'CREATE_NOTION_PAGE') {
     const linkRegex = /(https?:\/\/[^\s]+)/g;
     const links = (text.match(linkRegex) || []).map(url => ({ title: url, url }));
 
-    const extractPrompt = `
-Извлеки из текста пользователя название страницы для Notion и краткое описание.
-Текст пользователя: "${text}"
+    const title = intent.title || 'Новая запись';
+    const content = intent.content || text;
 
-Верни строго JSON формата:
-{"title": "Название страницы", "description": "Краткое описание страницы"}
-    `;
-
-    try {
-      const extracted = await askGemini(extractPrompt);
-      const jsonMatch = extracted.match(/\{[\s\S]*\}/);
-      let title = 'Новая страница';
-      let description = '';
-
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        title = parsed.title || title;
-        description = parsed.description || description;
-      }
-
-      const createdPage = await createNotionPage(title, description, links);
-      if (createdPage) {
-        return sendTelegramFormatted(ctx, `✅ **Страница "${title}" успешно создана в твоем Notion!**\n\n📄 [Открыть страницу в Notion](${createdPage.url})`);
-      } else {
-        return ctx.reply('⚠️ Не удалось создать страницу в Notion. Проверьте доступ и попробуйте еще раз.');
-      }
-    } catch (e) {
-      console.error('[NOTION CREATE ERROR]:', e.message);
+    const createdPage = await createNotionPage(title, content, links);
+    if (createdPage) {
+      return sendTelegramFormatted(ctx, `✅ **Страница "${title}" успешно создана в твоем Notion!**\n\n📄 [Открыть страницу в Notion](${createdPage.url})`);
+    } else {
+      return ctx.reply('⚠️ Не удалось создать страницу в Notion. Проверьте подключение и повторите.');
     }
   }
 
-  // 2. Check if message is related to Calendar
-  const calendarKeywords = ['встреч', 'расписани', 'календар', 'созвон', 'план на сегодня', 'что сегодня', 'дела на сегодня'];
-  const isCalendarQuery = calendarKeywords.some(k => text.toLowerCase().includes(k));
+  // 2. ACTION: Read / Summarize Notion
+  if (intent.action === 'READ_NOTION') {
+    const content = await getNotionPagesContent(intent.query || '');
+    if (content) {
+      const prompt = `Запрос пользователя: "${text}"\n\nВот актуальные данные из Notion:\n${content}\n\nОтветь на запрос пользователя, используя данные из Notion:`;
+      const response = await askGemini(prompt, SYSTEM_PROMPT);
+      return sendTelegramFormatted(ctx, response);
+    } else {
+      return ctx.reply('🔍 В твоем Notion пока нет страниц по этому запросу.');
+    }
+  }
 
-  if (isCalendarQuery) {
+  // 3. ACTION: Read Google Calendar
+  if (intent.action === 'READ_CALENDAR') {
     const events = await getCalendarEvents();
     if (events) {
       if (events.length === 0) {
@@ -255,26 +245,13 @@ bot.on('text', async (ctx) => {
         return `- ${start} ${end ? 'до ' + end : ''}: ${e.summary || 'Событие'}`;
       }).join('\n');
 
-      const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря на сегодня:\n${eventSummary}\n\nОтветь дружелюбно и четко:`;
+      const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря:\n${eventSummary}\n\nОтветь дружелюбно и четко:`;
       const response = await askGemini(prompt, SYSTEM_PROMPT);
       return sendTelegramFormatted(ctx, response);
     }
   }
 
-  // 3. Check if message is related to Notion reading/search
-  const notionKeywords = ['ноушен', 'notion', 'выжимк', 'тз', 'документаци', 'что лежит', 'страниц', 'дома аренд', 'открытк', 'проект'];
-  const isNotionQuery = notionKeywords.some(k => text.toLowerCase().includes(k));
-
-  if (isNotionQuery) {
-    const content = await getNotionPagesContent();
-    if (content) {
-      const prompt = `Запрос пользователя: "${text}"\n\nВот актуальные данные из Notion:\n${content}\n\nОтветь на запрос пользователя, используя данные из Notion:`;
-      const response = await askGemini(prompt, SYSTEM_PROMPT);
-      return sendTelegramFormatted(ctx, response);
-    }
-  }
-
-  // General assistant dialogue
+  // 4. ACTION: General Chat & Coding Assistance
   const response = await askGemini(text, SYSTEM_PROMPT);
   sendTelegramFormatted(ctx, response);
 });
