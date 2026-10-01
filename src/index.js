@@ -1,5 +1,6 @@
 import { Telegraf } from 'telegraf';
 import { Client as NotionClient } from '@notionhq/client';
+import { getCalendarEvents, createCalendarEvent } from './calendar.js';
 import dotenv from 'dotenv';
 import https from 'https';
 
@@ -138,7 +139,7 @@ const SYSTEM_PROMPT = `
 Дима — Fullstack-разработчик (React, TypeScript, Tailwind, Node.js, Express/NestJS, PostgreSQL, Docker).
 Его активные проекты: конструктор сайтов-открыток & поздравлений, CRM для аренды авто, SimpleOne enterprise low-code платформа.
 Твой стиль общения: дружелюбный, технически грамотный, уверенный, уважительный, лаконичный, на русском языке.
-Ты помогаешь Диме с проектами, выжимками из Notion, кодом, планированием задач и повседневными вопросами.
+Ты помогаешь Диме с проектами, выжимками из Notion, расписанием в Google Календаре, кодом, планированием задач и ответами.
 `;
 
 bot.start((ctx) => {
@@ -147,11 +148,34 @@ bot.start((ctx) => {
     `👋 Привет, ${name}! Я твой личный ассистент Jarvis.\n\n` +
     `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
     `📌 Что я умею:\n` +
-    `• 📄 Выжимки из Notion: напиши "сделай выжимку по проектам", "что лежит в notion?" или "/notion"\n` +
+    `• 📅 Календарь: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
+    `• 📄 Выжимки из Notion: напиши "что лежит в notion?" или /notion\n` +
     `• 🔍 Поиск по проектам: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
     `• 💬 Быстрый диалог: пиши мне как обычному напарнику по коду\n\n` +
-    `Попробуй спросить: "Что лежит в Notion?" или "Как дела?"!`
+    `Попробуй спросить: "Посмотри встречи на сегодня!" или "Что в Notion?"!`
   );
+});
+
+bot.command('calendar', async (ctx) => {
+  await ctx.sendChatAction('typing');
+  const events = await getCalendarEvents();
+  
+  if (!events) {
+    return ctx.reply('📅 Модуль календаря не настроен на сервере (нужно добавить переменные GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN).');
+  }
+
+  if (events.length === 0) {
+    return ctx.reply('📅 На сегодня в Google Календаре встреч не запланировано. Время свободно!');
+  }
+
+  let text = '📅 *Твои встречи на сегодня:*\n\n';
+  for (const e of events) {
+    const start = e.start?.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : 'Весь день';
+    const end = e.end?.dateTime ? new Date(e.end.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+    text += `• 🕐 *${start}${end ? ' - ' + end : ''}*: ${e.summary || 'Без названия'}\n`;
+  }
+
+  ctx.replyWithMarkdown(text);
 });
 
 bot.command('notion', async (ctx) => {
@@ -172,6 +196,29 @@ bot.command('notion', async (ctx) => {
 bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   await ctx.sendChatAction('typing');
+
+  // Check if message is related to Calendar
+  const calendarKeywords = ['встреч', 'расписани', 'календар', 'созвон', 'план на сегодня', 'что сегодня'];
+  const isCalendarQuery = calendarKeywords.some(k => text.toLowerCase().includes(k));
+
+  if (isCalendarQuery) {
+    const events = await getCalendarEvents();
+    if (events) {
+      if (events.length === 0) {
+        return ctx.reply('📅 На сегодня в твоем Google Календаре нет встреч. Расписание свободно!');
+      }
+
+      let eventSummary = events.map(e => {
+        const start = e.start?.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : 'Весь день';
+        const end = e.end?.dateTime ? new Date(e.end.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+        return `- ${start} ${end ? 'до ' + end : ''}: ${e.summary || 'Событие'}`;
+      }).join('\n');
+
+      const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря на сегодня:\n${eventSummary}\n\nОтветь дружелюбно, четко перечислив встречи:`;
+      const response = await askGemini(prompt, SYSTEM_PROMPT);
+      return ctx.reply(response);
+    }
+  }
 
   // Check if message is related to Notion
   const notionKeywords = ['ноушен', 'notion', 'выжимк', 'тз', 'документаци', 'что лежит', 'страниц', 'дома аренд', 'открытк', 'проект'];
