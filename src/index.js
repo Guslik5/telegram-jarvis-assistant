@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { Client as NotionClient } from '@notionhq/client';
 import { getCalendarEvents, createCalendarEvent } from './calendar.js';
+import { sendTelegramFormatted } from './formatter.js';
 import dotenv from 'dotenv';
 import https from 'https';
 
@@ -17,23 +18,6 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
-
-// Helper: safe reply with Markdown fallback
-async function replyFormatted(ctx, text) {
-  try {
-    // Convert **bold** to *bold* for Telegram Markdown
-    const tgMarkdown = text
-      .replace(/\*\*(.*?)\*\*/g, '*$1*')
-      .replace(/### (.*?)\n/g, '*$1*\n')
-      .replace(/## (.*?)\n/g, '*$1*\n')
-      .replace(/# (.*?)\n/g, '*$1*\n');
-
-    await ctx.replyWithMarkdown(tgMarkdown);
-  } catch (err) {
-    // If Markdown parsing fails, fallback to clean plain text
-    await ctx.reply(text);
-  }
-}
 
 // Gemini helper function with multimodal (Text + Images) support
 async function askGemini(prompt, systemInstruction = '', imageBuffer = null, mimeType = 'image/jpeg') {
@@ -183,16 +167,16 @@ const SYSTEM_PROMPT = `
 
 bot.start((ctx) => {
   const name = ctx.from.first_name || 'Дима';
-  replyFormatted(ctx,
-    `👋 *Привет, ${name}! Я твой личный ассистент Jarvis.*\n\n` +
+  sendTelegramFormatted(ctx,
+    `👋 **Привет, ${name}! Я твой личный ассистент Jarvis.**\n\n` +
     `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
-    `📌 *Что я умею:*\n` +
-    `• 📅 *Календарь*: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
-    `• 📄 *Выжимки из Notion*: напиши "что лежит в notion?" или /notion\n` +
-    `• 🖼 *Анализ фото и скриншотов*: отправь мне скриншот ошибки, макет Figma или фото документа\n` +
-    `• 🔍 *Поиск по проектам*: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
-    `• 💬 *Быстрый диалог*: пиши мне как обычному напарнику по коду\n\n` +
-    `Попробуй спросить: "Посмотри встречи на сегодня!" или отправь скриншот!`
+    `📌 **Что я умею:**\n` +
+    `• 📅 **Календарь**: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
+    `• 📄 **Выжимки из Notion**: напиши "что лежит в notion?" или /notion\n` +
+    `• 🖼 **Анализ фото и скриншотов**: отправь мне скриншот ошибки, макет Figma или фото документа\n` +
+    `• 🔍 **Поиск по проектам**: отвечу на любые вопросы по ТЗ, архитектуре, стеку\n` +
+    `• 💬 **Быстрый диалог**: пиши мне как обычному напарнику по коду\n\n` +
+    `Попробуй спросить: "Посмотри встречи на сегодня!" или "Сделай выжимку из Notion"!`
   );
 });
 
@@ -208,14 +192,14 @@ bot.command('calendar', async (ctx) => {
     return ctx.reply('📅 На сегодня в Google Календаре встреч не запланировано. Время свободно!');
   }
 
-  let text = '📅 *Твои встречи на сегодня:*\n\n';
+  let text = '📅 **Твои встречи на сегодня:**\n\n';
   for (const e of events) {
     const start = e.start?.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : 'Весь день';
     const end = e.end?.dateTime ? new Date(e.end.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
-    text += `• 🕐 *${start}${end ? ' - ' + end : ''}*: ${e.summary || 'Без названия'}\n`;
+    text += `• 🕐 **${start}${end ? ' - ' + end : ''}**: ${e.summary || 'Без названия'}\n`;
   }
 
-  replyFormatted(ctx, text);
+  sendTelegramFormatted(ctx, text);
 });
 
 bot.command('notion', async (ctx) => {
@@ -230,7 +214,7 @@ bot.command('notion', async (ctx) => {
   const prompt = `Пользователь запросил выжимку по Notion (запрос: "${query}"):\n${content}\n\nСделай емкое, структурированное и красивое резюме этой информации:`;
   const summary = await askGemini(prompt, SYSTEM_PROMPT);
 
-  replyFormatted(ctx, summary);
+  sendTelegramFormatted(ctx, summary);
 });
 
 // Photo handler: Multimodal analysis with Gemini Vision
@@ -246,7 +230,7 @@ bot.on('photo', async (ctx) => {
     const userCaption = ctx.message.caption || 'Проанализируй это изображение, подробно объясни что на нем и ответь на вопросы, если есть.';
     const response = await askGemini(userCaption, SYSTEM_PROMPT, imageBuffer, 'image/jpeg');
 
-    replyFormatted(ctx, response);
+    sendTelegramFormatted(ctx, response);
   } catch (err) {
     console.error('Error handling photo:', err.message);
     ctx.reply('Произошла ошибка при анализе изображения. Попробуйте отправить еще раз.');
@@ -276,7 +260,7 @@ bot.on('text', async (ctx) => {
 
       const prompt = `Запрос пользователя: "${text}"\n\nВот события из его Google Календаря на сегодня:\n${eventSummary}\n\nОтветь дружелюбно и четко:`;
       const response = await askGemini(prompt, SYSTEM_PROMPT);
-      return replyFormatted(ctx, response);
+      return sendTelegramFormatted(ctx, response);
     }
   }
 
@@ -289,13 +273,13 @@ bot.on('text', async (ctx) => {
     if (content) {
       const prompt = `Запрос пользователя: "${text}"\n\nВот актуальные данные из Notion:\n${content}\n\nОтветь на запрос пользователя, используя данные из Notion:`;
       const response = await askGemini(prompt, SYSTEM_PROMPT);
-      return replyFormatted(ctx, response);
+      return sendTelegramFormatted(ctx, response);
     }
   }
 
   // General assistant dialogue
   const response = await askGemini(text, SYSTEM_PROMPT);
-  replyFormatted(ctx, response);
+  sendTelegramFormatted(ctx, response);
 });
 
 // Launch bot
