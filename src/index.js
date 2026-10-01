@@ -10,6 +10,7 @@ dotenv.config();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || '1913377793';
 
 if (!BOT_TOKEN) {
   console.error('Error: TELEGRAM_BOT_TOKEN is required in .env');
@@ -18,6 +19,19 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
+
+// Security Middleware: Allow only Dima (ID: 1913377793)
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id?.toString();
+  const allowedIds = ALLOWED_USER_ID.split(',').map(id => id.trim());
+
+  if (userId && allowedIds.includes(userId)) {
+    return next();
+  }
+
+  console.log(`[SECURITY] Blocked unauthorized access attempt from User ID: ${userId} (${ctx.from?.username || 'unknown'})`);
+  return ctx.reply('Что ты тут ищешь) 🕵️‍♂️');
+});
 
 // Gemini helper function with multimodal (Text + Images) support
 async function askGemini(prompt, systemInstruction = '', imageBuffer = null, mimeType = 'image/jpeg') {
