@@ -12,14 +12,15 @@ export async function classifyUserIntent(userText, apiKey) {
 1. "CREATE_NOTION_PAGE" — если пользователь просит создать страницу, записать, сохранить, зафиксировать, добавить заметку или данные в Notion.
 2. "READ_NOTION" — если пользователь просит прочитать, сделать выжимку, найти или показать что лежит в Notion / документации.
 3. "READ_CALENDAR" — если пользователь спрашивает про встречи, расписание, созвоны, планы на сегодня / завтра / календарь.
-4. "GENERAL_CHAT" — если это обычный вопрос, диалог, программирование, совет или код.
+4. "READ_DRIVE" — если пользователь спрашивает про файлы, документы, таблицы на Google Диске (Google Drive, Docs, Sheets) или просит найти/прочитать файл на диске.
+5. "GENERAL_CHAT" — если это обычный вопрос, диалог, программирование, совет или код.
 
 Ответь СТРОГО валидным JSON без markdown оберток:
 {
-  "action": "CREATE_NOTION_PAGE" | "READ_NOTION" | "READ_CALENDAR" | "GENERAL_CHAT",
+  "action": "CREATE_NOTION_PAGE" | "READ_NOTION" | "READ_CALENDAR" | "READ_DRIVE" | "GENERAL_CHAT",
   "title": "Название страницы (только для CREATE_NOTION_PAGE)",
   "content": "Текст/данные для сохранения (только для CREATE_NOTION_PAGE)",
-  "query": "Поисковый запрос (только для READ_NOTION)"
+  "query": "Поисковый запрос (для READ_NOTION или READ_DRIVE)"
 }
 `;
 

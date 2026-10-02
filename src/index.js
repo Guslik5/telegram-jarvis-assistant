@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { getCalendarEvents, createCalendarEvent } from './calendar.js';
 import { getNotionPagesContent, createNotionPage } from './notion.js';
+import { listDriveFiles, searchDriveFiles, readDriveFile } from './drive.js';
 import { sendTelegramFormatted } from './formatter.js';
 import { classifyUserIntent } from './router.js';
 import dotenv from 'dotenv';
@@ -153,10 +154,11 @@ bot.start((ctx) => {
   const name = ctx.from.first_name || 'Дима';
   sendTelegramFormatted(ctx,
     `👋 **Привет, ${name}! Я твой личный ассистент Jarvis.**\n\n` +
-    `Я подключен к твоему Notion, Google Календарю и твоим проектам.\n\n` +
+    `Я подключен к твоему Notion, Google Календарю, Google Диску и твоим проектам.\n\n` +
     `📌 **Что я умею:**\n` +
     `• 📅 **Календарь**: напиши "какие встречи сегодня?", "что в расписании?" или /calendar\n` +
-    `• 📄 **Notion**: выжимки ("что в notion?"), создание страниц ("запиши номер телефона в notion", "создай страницу по проекту")\n` +
+    `• 📁 **Google Диск**: "какие документы на диске?", "найди файл в drive" или /drive\n` +
+    `• 📄 **Notion**: выжимки ("что в notion?"), создание страниц ("запиши заметку в notion")\n` +
     `• 🖼 **Анализ фото**: отправь скриншот ошибки, макет Figma или фото\n` +
     `• 💬 **Диалог**: пиши мне любые вопросы по коду и задачам!`
   );
@@ -180,6 +182,24 @@ bot.command('calendar', async (ctx) => {
     const end = e.end?.dateTime ? new Date(e.end.dateTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
     text += `• 🕐 **${start}${end ? ' - ' + end : ''}**: ${e.summary || 'Без названия'}\n`;
   }
+
+  sendTelegramFormatted(ctx, text);
+});
+
+bot.command('drive', async (ctx) => {
+  const query = ctx.message.text.replace('/drive', '').trim();
+  await ctx.sendChatAction('typing');
+
+  const files = query ? await searchDriveFiles(query) : await listDriveFiles(10);
+  if (!files || files.length === 0) {
+    return ctx.reply('📁 На Google Диске файлов не найдено.');
+  }
+
+  let text = `📁 **Файлы на Google Диске${query ? ` (поиск "${query}")` : ''}:**\n\n`;
+  files.forEach((f, idx) => {
+    const link = f.webViewLink ? `[${f.name}](${f.webViewLink})` : `**${f.name}**`;
+    text += `${idx + 1}. 📄 ${link}\n`;
+  });
 
   sendTelegramFormatted(ctx, text);
 });
@@ -275,7 +295,31 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // 4. ACTION: General Chat & Coding Assistance
+  // 4. ACTION: Google Drive (List / Search / Read)
+  if (intent.action === 'READ_DRIVE') {
+    const files = intent.query ? await searchDriveFiles(intent.query) : await listDriveFiles(10);
+    if (files && files.length > 0) {
+      let fileListText = files.map((f, i) => `${i + 1}. [${f.name}](${f.webViewLink || f.id}) (${f.mimeType})`).join('\n');
+      
+      // If user specifically asked about a document, try to read the top match if it's a doc
+      if (files.length === 1 || (intent.query && files[0].mimeType === 'application/vnd.google-apps.document')) {
+        const docData = await readDriveFile(files[0].id);
+        if (docData && docData.content) {
+          const prompt = `Запрос пользователя: "${text}"\n\nДокумент "${docData.name}" на Google Диске:\n${docData.content.substring(0, 4000)}\n\nОтветь на вопрос пользователя на основе этого документа:`;
+          const response = await askGemini(prompt, SYSTEM_PROMPT);
+          return sendTelegramFormatted(ctx, response);
+        }
+      }
+
+      const prompt = `Запрос пользователя: "${text}"\n\nВот найденные файлы на Google Диске:\n${fileListText}\n\nПредоставь пользователю аккуратный список со ссылками:`;
+      const response = await askGemini(prompt, SYSTEM_PROMPT);
+      return sendTelegramFormatted(ctx, response);
+    } else {
+      return ctx.reply('📁 На твоем Google Диске не найдено файлов по этому запросу.');
+    }
+  }
+
+  // 5. ACTION: General Chat & Coding Assistance
   const response = await askGemini(text, SYSTEM_PROMPT);
   sendTelegramFormatted(ctx, response);
 });
