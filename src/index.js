@@ -5,12 +5,14 @@ import { sendTelegramFormatted } from './formatter.js';
 import { classifyUserIntent } from './router.js';
 import dotenv from 'dotenv';
 import https from 'https';
+import http from 'http';
 
 dotenv.config();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || '1913377793';
+const PORT = process.env.PORT || 10000;
 
 if (!BOT_TOKEN) {
   console.error('Error: TELEGRAM_BOT_TOKEN is required in .env');
@@ -18,6 +20,28 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// 1. HTTP Server for Render Health Check and Port Binding
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('🚀 Jarvis Telegram Bot is running healthy 24/7!\n');
+});
+
+server.listen(PORT, () => {
+  console.log(`[SERVER] HTTP health check listening on port ${PORT}`);
+});
+
+// 2. Self-ping Keep-Alive mechanism for Render Free Tier (pings every 10 min)
+setInterval(() => {
+  const externalUrl = process.env.RENDER_EXTERNAL_URL;
+  if (externalUrl) {
+    https.get(externalUrl, (res) => {
+      console.log(`[KEEP-ALIVE] Pinged ${externalUrl} - Status: ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.error('[KEEP-ALIVE] Ping error:', err.message);
+    });
+  }
+}, 10 * 60 * 1000);
 
 // Security Middleware: Allow only Dima (ID: 1913377793)
 bot.use(async (ctx, next) => {
@@ -262,5 +286,11 @@ bot.launch().then(() => {
 });
 
 // Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  server.close();
+  bot.stop('SIGINT');
+});
+process.once('SIGTERM', () => {
+  server.close();
+  bot.stop('SIGTERM');
+});
