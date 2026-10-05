@@ -6,8 +6,8 @@ dotenv.config();
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
 
-// Default root page ID (My life)
-let cachedRootPageId = '3ec3762b-86ba-80f9-b7ef-fb663ecea911';
+// Default root page ID (My life - my rules)
+let cachedRootPageId = process.env.NOTION_PARENT_PAGE_ID || '2e9ba529-1aa3-81ed-b461-e37fde1048ac';
 
 export async function getRootPageId() {
   if (cachedRootPageId) return cachedRootPageId;
